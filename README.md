@@ -51,7 +51,7 @@
 
 ### 快速开始
 
-1. 打开 `index.html` 文件 （本地打开无效果，需要部署到 `https` 网站）
+1. 打开 `index.html` 文件 （本地打开无效果，需要部署到 `https` 网站，[wsr示例站点](https://ai-star-dev.github.io/web-screen-recoder/)）
 2. 选择录制源（屏幕/摄像头/标签页）
 3. 选择音频源（如果需要）
 4. 调整视频质量设置
@@ -97,7 +97,7 @@
 
 **无法开始录制**
 
-- 检查浏览器是否支持 MediaRecorder API (或者打开线上 https 站点 `test.html` 对应的页面)
+- 检查浏览器是否支持 MediaRecorder API (或者打开线上 https 站点 `https://ai-star-dev.github.io/web-screen-recoder/test.html` 对应的页面)
 - 确认已授予摄像头/麦克风权限
 - 尝试刷新页面重新授权
 
