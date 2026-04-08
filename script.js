@@ -316,13 +316,13 @@ class WebRecorder {
     
     processRecording() {
         if (this.recordedChunks.length === 0) return;
-        
+
         // 使用与MediaRecorder相同的格式创建blob
         const mimeType = this.mediaRecorder.mimeType || 'video/webm';
-        const blob = new Blob(this.recordedChunks, { 
-            type: mimeType 
+        const blob = new Blob(this.recordedChunks, {
+            type: mimeType
         });
-        
+
         // 根据实际的mimeType确定文件扩展名
         let fileExtension = '.webm';
         if (mimeType.includes('mp4')) {
@@ -330,15 +330,13 @@ class WebRecorder {
         } else if (mimeType.includes('mpeg')) {
             fileExtension = '.mpeg';
         }
-        
+
         const filename = `recording_${new Date().getTime()}${fileExtension}`;
-        const url = URL.createObjectURL(blob);
-        
-        // 保存录制文件
+
+        // 保存录制文件（blob 持久化到 IndexedDB，元数据到 localStorage）
         this.saveRecording({
             id: Date.now(),
             filename: filename,
-            url: url,
             blob: blob,
             mimeType: mimeType,
             size: blob.size,
@@ -441,15 +439,76 @@ class WebRecorder {
         }
     }
     
+    // IndexedDB helpers — persist actual blob data across page refreshes
+    openDB() {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open('WebRecorderDB', 1);
+            request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                if (!db.objectStoreNames.contains('recordings')) {
+                    db.createObjectStore('recordings', { keyPath: 'id' });
+                }
+            };
+            request.onsuccess = (event) => resolve(event.target.result);
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    async saveBlobToDB(id, blob) {
+        const db = await this.openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('recordings', 'readwrite');
+            tx.objectStore('recordings').put({ id, blob });
+            tx.oncomplete = () => resolve();
+            tx.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    async getBlobFromDB(id) {
+        const db = await this.openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('recordings', 'readonly');
+            const request = tx.objectStore('recordings').get(id);
+            request.onsuccess = (event) => resolve(event.target.result?.blob || null);
+            request.onerror = (event) => reject(event.target.error);
+        });
+    }
+
+    async deleteBlobFromDB(id) {
+        const db = await this.openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction('recordings', 'readwrite');
+            tx.objectStore('recordings').delete(id);
+            tx.oncomplete = () => resolve();
+            tx.onerror = (event) => reject(event.target.error);
+        });
+    }
+
     saveRecording(recording) {
+        // Save blob to IndexedDB (persists across page refreshes)
+        this.saveBlobToDB(recording.id, recording.blob).catch(err => {
+            console.error('保存视频数据失败:', err);
+        });
+
+        // Save only serializable metadata to localStorage
         let recordings = this.getStoredRecordings();
-        recordings.push(recording);
-        
-        // 限制存储数量（最多保存20个录制文件）
+        const metadata = {
+            id: recording.id,
+            filename: recording.filename,
+            mimeType: recording.mimeType,
+            size: recording.size,
+            duration: recording.duration,
+            date: recording.date
+        };
+        recordings.push(metadata);
+
+        // Limit to 20 entries; clean up removed blobs from IndexedDB
         if (recordings.length > 20) {
+            const toDelete = recordings.slice(0, recordings.length - 20);
+            toDelete.forEach(r => this.deleteBlobFromDB(r.id));
             recordings = recordings.slice(-20);
         }
-        
+
         localStorage.setItem('webRecorderRecordings', JSON.stringify(recordings));
     }
     
@@ -500,62 +559,91 @@ class WebRecorder {
         });
     }
     
-    playRecording(id) {
+    async playRecording(id) {
         const recordings = this.getStoredRecordings();
         const recording = recordings.find(r => r.id === parseInt(id));
-        
-        if (recording) {
-            // 创建模态框播放器
-            const modal = document.createElement('div');
-            modal.style.cssText = `
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100%;
-                height: 100%;
-                background: rgba(0,0,0,0.8);
-                z-index: 2000;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            `;
-            
-            modal.innerHTML = `
-                <div style="background: white; padding: 20px; border-radius: 10px; max-width: 80%; max-height: 80%;">
-                    <h3>${recording.filename}</h3>
-                    <video controls autoplay style="max-width: 100%; max-height: 70vh;">
-                        <source src="${recording.url}" type="video/webm">
-                        您的浏览器不支持视频播放。
-                    </video>
-                    <br>
-                    <button class="btn btn-danger" style="margin-top: 10px;" onclick="this.closest('div').closest('div').remove()">关闭</button>
-                </div>
-            `;
-            
-            document.body.appendChild(modal);
+
+        if (!recording) return;
+
+        const blob = await this.getBlobFromDB(parseInt(id));
+        if (!blob) {
+            alert('视频数据不可用，可能已被清除');
+            return;
         }
+
+        const url = URL.createObjectURL(blob);
+
+        // 创建模态框播放器
+        const modal = document.createElement('div');
+        modal.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.8);
+            z-index: 2000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        `;
+
+        const closeModal = () => {
+            URL.revokeObjectURL(url);
+            modal.remove();
+        };
+
+        modal.innerHTML = `
+            <div style="background: white; padding: 20px; border-radius: 10px; max-width: 80%; max-height: 80%;">
+                <h3>${recording.filename}</h3>
+                <video controls autoplay style="max-width: 100%; max-height: 70vh;">
+                    <source src="${url}" type="${recording.mimeType}">
+                    您的浏览器不支持视频播放。
+                </video>
+                <br>
+                <button class="btn btn-danger close-modal-btn" style="margin-top: 10px;">关闭</button>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        // 点击关闭按钮关闭
+        modal.querySelector('.close-modal-btn').addEventListener('click', closeModal);
+        // 点击遮罩背景也关闭
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) closeModal();
+        });
     }
     
-    downloadRecording(id) {
+    async downloadRecording(id) {
         const recordings = this.getStoredRecordings();
         const recording = recordings.find(r => r.id === parseInt(id));
-        
-        if (recording) {
-            const link = document.createElement('a');
-            link.href = recording.url;
-            link.download = recording.filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
+
+        if (!recording) return;
+
+        const blob = await this.getBlobFromDB(parseInt(id));
+        if (!blob) {
+            alert('视频数据不可用，可能已被清除');
+            return;
         }
+
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = recording.filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
     }
     
     deleteRecording(id) {
         if (confirm('确定要删除这个录制文件吗？')) {
             let recordings = this.getStoredRecordings();
             recordings = recordings.filter(r => r.id !== parseInt(id));
-            
+
             localStorage.setItem('webRecorderRecordings', JSON.stringify(recordings));
+            this.deleteBlobFromDB(parseInt(id));
             this.displayRecordings(recordings);
         }
     }
